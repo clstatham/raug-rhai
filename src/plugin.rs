@@ -1,106 +1,166 @@
-use raug::prelude::*;
+use raug::{
+    graph::node::{IntoInputIdx, IntoOutputIdx},
+    prelude::*,
+};
+
 use raug_ext::prelude::*;
-use rhai::{CustomType, TypeBuilder, plugin::*};
 
-#[export_module(name = "raug")]
-pub mod raug_plugin {
-    use crate::{GRAPH, processor::RhaiFnProcessor};
+use crate::processor::RhaiFnProcessor;
 
-    use super::*;
+pub(crate) fn init_engine(engine: &mut rhai::Engine) {
+    engine
+        .build_type::<RhaiNode>()
+        .build_type::<RhaiInput>()
+        .build_type::<RhaiOutput>()
+        .register_fn("play", play)
+        .register_fn("stop", stop)
+        .register_fn("adc", adc)
+        .register_fn("dac", dac)
+        .register_fn("sample_rate", sample_rate)
+        .register_fn("processor", processor)
+        .register_fn("sine_osc", sine_osc);
+}
 
-    #[derive(Clone, CustomType)]
-    #[rhai_type(name = "Output")]
-    pub struct RhaiOutput(Output);
+#[derive(Clone)]
+struct RhaiDynamic(rhai::Dynamic);
 
-    #[derive(Clone, CustomType)]
-    #[rhai_type(name = "Input")]
-    pub struct RhaiInput(Input);
-
-    #[derive(Clone, CustomType)]
-    #[rhai_type(name = "Graph")]
-    pub struct RhaiGraph(Graph);
-
-    #[derive(Clone, CustomType)]
-    #[rhai_type(name = "Node")]
-    pub struct RhaiNode(Node);
-
-    #[rhai_fn(global)]
-    pub fn inputs(node: RhaiNode, inputs: rhai::Array) -> RhaiNode {
-        for (i, input) in inputs.into_iter().enumerate() {
-            let input = if let Ok(input) = input.as_float() {
-                RhaiOutput(input.into_output(&GRAPH))
-            } else if let Ok(input) = input.as_int() {
-                RhaiOutput(input.into_output(&GRAPH))
-            } else if let Ok(input) = input.as_bool() {
-                RhaiOutput(input.into_output(&GRAPH))
-            } else if let Ok(input) = input.clone().try_cast_result::<RhaiOutput>() {
-                input
-            } else {
-                panic!("Invalid input type for node: {}", input.type_name());
-            };
-            node.0.input(i as u32).connect(input.0);
-        }
-        node.clone()
+impl From<rhai::Dynamic> for RhaiDynamic {
+    fn from(value: rhai::Dynamic) -> Self {
+        RhaiDynamic(value)
     }
+}
 
-    #[rhai_fn(global)]
-    pub fn output(node: RhaiNode, index: Dynamic) -> RhaiOutput {
-        if let Ok(index) = index.as_int() {
-            RhaiOutput(node.0.output(index as u32))
-        } else if let Ok(index) = index.as_immutable_string_ref() {
-            RhaiOutput(node.0.output(&*index.to_string()))
+impl IntoOutput for RhaiDynamic {
+    fn into_output(self, graph: &Graph) -> Output {
+        if let Some(node) = self.0.clone().try_cast::<RhaiNode>() {
+            node.0.assert_single_output("RhaiDynamic::into_output()");
+            node.0.output(0)
+        } else if let Some(node) = self.0.clone().try_cast::<f32>() {
+            node.into_output(graph)
+        } else if let Some(node) = self.0.clone().try_cast::<i32>() {
+            node.into_output(graph)
+        } else if let Some(node) = self.0.clone().try_cast::<bool>() {
+            node.into_output(graph)
+        } else if let Some(node) = self.0.clone().try_cast::<RhaiOutput>() {
+            node.0
         } else {
-            panic!("Invalid index type for output: {}", index.type_name());
+            panic!("Invalid type for IntoOutput: {}", self.0.type_name());
         }
     }
+}
 
-    #[rhai_fn(global)]
-    pub fn play() {
-        if crate::STREAM.lock().unwrap().is_some() {
-            return;
-        }
-        let mut stream = CpalStream::default();
-        stream.spawn(&crate::GRAPH).unwrap();
-        stream.play().unwrap();
-        crate::STREAM.lock().unwrap().replace(stream);
-    }
-
-    #[rhai_fn(global)]
-    pub fn stop() {
-        if let Some(mut stream) = crate::STREAM.lock().unwrap().take() {
-            stream.stop().unwrap();
-            stream.join().unwrap();
+impl IntoInputIdx for RhaiDynamic {
+    fn into_input_idx(self, node: &Node) -> u32 {
+        if let Ok(idx) = self.0.as_int() {
+            (idx as u32).into_input_idx(node)
+        } else if let Ok(idx) = self.0.as_immutable_string_ref() {
+            idx.into_input_idx(node)
+        } else {
+            panic!("Invalid type for IntoInputIdx: {}", self.0.type_name());
         }
     }
+}
 
-    #[rhai_fn(global)]
-    pub fn dac(input: RhaiOutput) -> RhaiNode {
-        let node = crate::GRAPH.add_audio_output();
-        node.input(0).connect(input.0);
-        RhaiNode(node)
+impl IntoOutputIdx for RhaiDynamic {
+    fn into_output_idx(self, node: &Node) -> u32 {
+        if let Ok(idx) = self.0.as_int() {
+            (idx as u32).into_output_idx(node)
+        } else if let Ok(idx) = self.0.as_immutable_string_ref() {
+            idx.into_output_idx(node)
+        } else {
+            panic!("Invalid type for IntoOutputIdx: {}", self.0.type_name());
+        }
     }
+}
 
-    #[rhai_fn(global)]
-    pub fn adc() -> RhaiOutput {
-        let node = crate::GRAPH.add_audio_input();
-        RhaiOutput(node.output(0))
-    }
+#[derive(Clone)]
+pub struct RhaiOutput(Output);
 
-    #[rhai_fn(global)]
-    pub fn sample_rate() -> RhaiOutput {
-        let node = crate::GRAPH.add(SampleRate::default());
-        RhaiOutput(node.output(0))
+impl rhai::CustomType for RhaiOutput {
+    fn build(mut builder: rhai::TypeBuilder<Self>) {
+        builder.with_name("Output");
+        builder.with_fn("connect", |output: &mut Self, input: RhaiInput| {
+            output.0.connect(&input.0);
+            output.clone()
+        });
+        builder.with_fn("node", |output: &mut Self| RhaiNode(output.0.node()));
     }
+}
 
-    #[rhai_fn(global)]
-    pub fn processor(map: rhai::Map) -> RhaiNode {
-        let node = crate::GRAPH.add(RhaiFnProcessor::from_map(map));
-        RhaiNode(node)
-    }
+#[derive(Clone)]
+pub struct RhaiInput(Input);
 
-    #[rhai_fn(global)]
-    pub fn sine_osc() -> RhaiNode {
-        let node = crate::GRAPH.add(SineOscillator::default());
-        RhaiNode(node)
+impl rhai::CustomType for RhaiInput {
+    fn build(mut builder: rhai::TypeBuilder<Self>) {
+        builder.with_name("Input");
+        builder.with_fn("connect", |input: &mut Self, output: rhai::Dynamic| {
+            input.0.connect(RhaiDynamic(output));
+            input.clone()
+        });
+        builder.with_fn("node", |input: &mut Self| RhaiNode(input.0.node()));
     }
+}
+
+#[derive(Clone)]
+pub struct RhaiNode(Node);
+
+impl rhai::CustomType for RhaiNode {
+    fn build(mut builder: rhai::TypeBuilder<Self>) {
+        builder.with_name("Node");
+        builder.with_fn("input", |node: &mut Self, index: rhai::Dynamic| {
+            RhaiInput(node.0.input(RhaiDynamic(index).into_input_idx(&node.0)))
+        });
+        builder.with_fn("output", |node: &mut Self, index: rhai::Dynamic| {
+            RhaiOutput(node.0.output(RhaiDynamic(index).into_output_idx(&node.0)))
+        });
+        builder.with_fn("set_inputs", |node: &mut Self, idxs: rhai::Array| {
+            for (i, input) in idxs.into_iter().enumerate() {
+                node.0.input(i as u32).connect(RhaiDynamic(input));
+            }
+            node.clone()
+        });
+    }
+}
+
+pub fn play() {
+    if crate::STREAM.lock().unwrap().is_some() {
+        return;
+    }
+    let mut stream = CpalStream::default();
+    stream.spawn(&crate::GRAPH).unwrap();
+    stream.play().unwrap();
+    crate::STREAM.lock().unwrap().replace(stream);
+}
+
+pub fn stop() {
+    if let Some(mut stream) = crate::STREAM.lock().unwrap().take() {
+        stream.stop().unwrap();
+        stream.join().unwrap();
+    }
+}
+
+pub fn dac(input: RhaiOutput) -> RhaiNode {
+    let node = crate::GRAPH.add_audio_output();
+    node.input(0).connect(input.0);
+    RhaiNode(node)
+}
+
+pub fn adc() -> RhaiOutput {
+    let node = crate::GRAPH.add_audio_input();
+    RhaiOutput(node.output(0))
+}
+
+pub fn sample_rate() -> RhaiOutput {
+    let node = crate::GRAPH.add(SampleRate::default());
+    RhaiOutput(node.output(0))
+}
+
+pub fn processor(map: rhai::Map) -> RhaiNode {
+    let node = crate::GRAPH.add(RhaiFnProcessor::from_map(map));
+    RhaiNode(node)
+}
+
+pub fn sine_osc() -> RhaiNode {
+    let node = crate::GRAPH.add(SineOscillator::default());
+    RhaiNode(node)
 }

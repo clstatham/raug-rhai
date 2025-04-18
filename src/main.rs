@@ -5,7 +5,7 @@ use std::{
 
 use clap::Parser;
 use raug::{graph::Graph, prelude::CpalStream};
-use rhai::{Engine, exported_module};
+use rhai::Engine;
 
 pub mod plugin;
 pub mod processor;
@@ -17,14 +17,11 @@ pub static STREAM: Mutex<Option<CpalStream>> = Mutex::new(None);
 
 fn init_engine() -> Engine {
     let mut engine = Engine::new();
-    let plugin_module = exported_module!(plugin::raug_plugin);
     engine.set_strict_variables(true);
     engine.set_max_expr_depths(0, 0);
-    engine.build_type::<plugin::raug_plugin::RhaiNode>();
-    engine.build_type::<plugin::raug_plugin::RhaiOutput>();
-    engine.build_type::<plugin::raug_plugin::RhaiInput>();
-    engine.build_type::<plugin::raug_plugin::RhaiGraph>();
-    engine.register_global_module(plugin_module.into());
+
+    plugin::init_engine(&mut engine);
+
     engine
 }
 
@@ -33,13 +30,16 @@ struct Args {
     file: PathBuf,
 }
 
-fn main() {
+fn main() -> anyhow::Result<()> {
     let args = Args::parse();
     let file = args.file;
-    let source = std::fs::read_to_string(file).unwrap();
-    let ast = ENGINE.compile(source).unwrap();
+    let source = std::fs::read_to_string(file)?;
+
+    LazyLock::force(&ENGINE);
+    LazyLock::force(&GRAPH);
+
+    let ast = ENGINE.compile(source)?;
     AST.get_or_init(|| ast);
-    ENGINE
-        .call_fn::<()>(&mut rhai::Scope::default(), AST.get().unwrap(), "main", ())
-        .unwrap();
+    ENGINE.call_fn::<()>(&mut rhai::Scope::default(), AST.get().unwrap(), "main", ())?;
+    Ok(())
 }

@@ -1,3 +1,5 @@
+const two_pi = 6.283185307179586476925286766559;
+
 fn main() {
     let osc = processor(#{
         input_spec: [
@@ -9,14 +11,15 @@ fn main() {
         ],
         t: 0.0,
         process: |freq, sample_rate| {
+            
             this.t += 1.0;
-            let t2 =  this.t * freq * 6.283185307179586476925286766559; // 2 * pi
-            let out = sin(t2 / sample_rate) * 0.1;
+            this.t %= sample_rate;
+            let out = sin(this.t * freq * global::two_pi / sample_rate) * 0.1;
             return [
                 out,
             ];
         },
-    }).inputs([440.0, sample_rate()]);
+    }).set_inputs([440.0, sample_rate()]);
 
     
     dac(osc.output(0));
