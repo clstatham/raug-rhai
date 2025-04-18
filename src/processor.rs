@@ -1,14 +1,11 @@
 use raug::{prelude::*, processor::io::ProcessorOutput};
 
-use crate::{AST, ENGINE};
+use crate::ENGINE;
 
 fn str_to_signal_type(s: &str) -> SignalType {
     match s {
         "f32" => f32::signal_type(),
-        "i32" => i32::signal_type(),
         "i64" => i64::signal_type(),
-        "u32" => u32::signal_type(),
-        "u64" => u64::signal_type(),
         "bool" => bool::signal_type(),
         _ => panic!("Unknown signal type: {}", s),
     }
@@ -17,10 +14,7 @@ fn str_to_signal_type(s: &str) -> SignalType {
 fn buf_of_type(size: usize, signal_type: SignalType) -> AnyBuffer {
     match signal_type {
         t if t == f32::signal_type() => AnyBuffer::zeros::<f32>(size),
-        t if t == i32::signal_type() => AnyBuffer::zeros::<i32>(size),
         t if t == i64::signal_type() => AnyBuffer::zeros::<i64>(size),
-        t if t == u32::signal_type() => AnyBuffer::zeros::<u32>(size),
-        t if t == u64::signal_type() => AnyBuffer::zeros::<u64>(size),
         t if t == bool::signal_type() => AnyBuffer::zeros::<bool>(size),
         _ => panic!("Unknown signal type: {:?}", signal_type),
     }
@@ -29,10 +23,7 @@ fn buf_of_type(size: usize, signal_type: SignalType) -> AnyBuffer {
 fn dynamic_of_type(signal: &AnySignalRef, signal_type: SignalType) -> rhai::Dynamic {
     match signal_type {
         t if t == f32::signal_type() => rhai::Dynamic::from(*signal.downcast_ref::<f32>().unwrap()),
-        t if t == i32::signal_type() => rhai::Dynamic::from(*signal.downcast_ref::<i32>().unwrap()),
         t if t == i64::signal_type() => rhai::Dynamic::from(*signal.downcast_ref::<i64>().unwrap()),
-        t if t == u32::signal_type() => rhai::Dynamic::from(*signal.downcast_ref::<u32>().unwrap()),
-        t if t == u64::signal_type() => rhai::Dynamic::from(*signal.downcast_ref::<u64>().unwrap()),
         t if t == bool::signal_type() => {
             rhai::Dynamic::from(*signal.downcast_ref::<bool>().unwrap())
         }
@@ -51,20 +42,8 @@ fn set_from_dynamic(
             let value = value.as_float().unwrap();
             *output.get_mut_as(sample_index).unwrap() = value;
         }
-        t if t == i32::signal_type() => {
-            let value = value.as_int().unwrap() as i32;
-            *output.get_mut_as(sample_index).unwrap() = value;
-        }
         t if t == i64::signal_type() => {
             let value = value.as_int().unwrap();
-            *output.get_mut_as(sample_index).unwrap() = value;
-        }
-        t if t == u32::signal_type() => {
-            let value = value.as_int().unwrap() as u32;
-            *output.get_mut_as(sample_index).unwrap() = value;
-        }
-        t if t == u64::signal_type() => {
-            let value = value.as_int().unwrap() as u64;
             *output.get_mut_as(sample_index).unwrap() = value;
         }
         t if t == bool::signal_type() => {
@@ -85,14 +64,27 @@ impl rhai::FuncArgs for InputArgs {
     }
 }
 
-pub struct RhaiFnProcessor {
+#[derive(Debug, Clone)]
+pub struct RhaiProcEnv(ProcEnv);
+
+impl rhai::CustomType for RhaiProcEnv {
+    fn build(mut builder: rhai::TypeBuilder<Self>) {
+        builder
+            .with_name("ProcEnv")
+            .with_get("sample_rate", |this: &mut Self| this.0.sample_rate)
+            .with_get("block_size", |this: &mut Self| this.0.block_size);
+    }
+}
+
+pub(crate) struct RhaiProcessorInternal {
     map: rhai::Dynamic,
     input_spec: Vec<SignalSpec>,
     output_spec: Vec<SignalSpec>,
     fn_name: String,
+    scope: rhai::Scope<'static>,
 }
 
-impl RhaiFnProcessor {
+impl RhaiProcessorInternal {
     pub fn from_map(map: rhai::Map) -> Self {
         let process_func = map
             .get("process")
@@ -166,16 +158,74 @@ impl RhaiFnProcessor {
             output_spec.push(signal_spec);
         }
 
+        let scope = rhai::Scope::new();
+
         Self {
             map: map.into(),
             input_spec,
             output_spec,
             fn_name,
+            scope,
         }
+    }
+
+    pub fn process_internal(
+        &mut self,
+        inputs: ProcessorInputs,
+        outputs: &mut ProcessorOutputs,
+        engine: &rhai::Engine,
+        ast: &rhai::AST,
+    ) -> Result<(), ProcessorError> {
+        let mut input_args = smallvec::SmallVec::<[rhai::Dynamic; 16]>::new();
+        input_args.reserve(self.input_spec.len() + 1);
+
+        for sample_index in 0..inputs.block_size() {
+            input_args.push(rhai::Dynamic::from(RhaiProcEnv(inputs.env)));
+
+            for (input_index, input_spec) in self.input_spec.iter().enumerate() {
+                let input_signal = inputs
+                    .input(input_index)
+                    .unwrap()
+                    .get(sample_index)
+                    .unwrap();
+                let input_arg = dynamic_of_type(&input_signal, input_spec.signal_type);
+                input_args.push(input_arg);
+            }
+
+            let result: rhai::Array = engine
+                .call_fn_with_options(
+                    rhai::CallFnOptions::new()
+                        .bind_this_ptr(&mut self.map)
+                        .eval_ast(true),
+                    &mut self.scope,
+                    ast,
+                    &self.fn_name,
+                    InputArgs(input_args.clone()),
+                )
+                .expect("Failed to call `process` function");
+
+            for (output_index, output_spec) in self.output_spec.iter().enumerate() {
+                let output_value = &result[output_index];
+                set_from_dynamic(
+                    &mut outputs.output(output_index),
+                    sample_index,
+                    output_spec.signal_type,
+                    output_value,
+                );
+            }
+
+            input_args.clear();
+        }
+
+        Ok(())
     }
 }
 
-impl Processor for RhaiFnProcessor {
+impl Processor for RhaiProcessorInternal {
+    fn name(&self) -> &str {
+        "RhaiProcessor"
+    }
+
     fn input_spec(&self) -> Vec<SignalSpec> {
         self.input_spec.clone()
     }
@@ -197,42 +247,58 @@ impl Processor for RhaiFnProcessor {
         inputs: ProcessorInputs,
         mut outputs: ProcessorOutputs,
     ) -> Result<(), ProcessorError> {
-        let mut input_values = smallvec::SmallVec::<[rhai::Dynamic; 16]>::new();
-        for sample_index in 0..inputs.block_size() {
-            for (input_index, input_spec) in self.input_spec.iter().enumerate() {
-                let input_signal = inputs
-                    .input(input_index)
-                    .unwrap()
-                    .get(sample_index)
-                    .unwrap();
-                let input_value = dynamic_of_type(&input_signal, input_spec.signal_type);
-                input_values.push(input_value);
-            }
+        self.process_internal(
+            inputs,
+            &mut outputs,
+            &crate::ENGINE,
+            crate::AST.get().unwrap(),
+        )?;
 
-            let result: rhai::Array = ENGINE
-                .call_fn_with_options(
-                    rhai::CallFnOptions::new()
-                        .bind_this_ptr(&mut self.map)
-                        .eval_ast(true),
-                    &mut rhai::Scope::new(),
-                    AST.get().unwrap(),
-                    &self.fn_name,
-                    InputArgs(input_values.clone()),
-                )
-                .expect("Failed to call `process` function");
+        Ok(())
+    }
+}
 
-            for (output_index, output_spec) in self.output_spec.iter().enumerate() {
-                let output_value = &result[output_index];
-                set_from_dynamic(
-                    &mut outputs.output(output_index),
-                    sample_index,
-                    output_spec.signal_type,
-                    output_value,
-                );
-            }
+pub struct RhaiProcessor {
+    ast: rhai::AST,
+    inner: RhaiProcessorInternal,
+}
 
-            input_values.clear();
+impl RhaiProcessor {
+    pub fn new(script: &str) -> Self {
+        let ast = ENGINE.compile(script).unwrap();
+        let map = ENGINE.eval_ast::<rhai::Map>(&ast).unwrap();
+
+        Self {
+            ast,
+            inner: RhaiProcessorInternal::from_map(map),
         }
+    }
+}
+
+impl Processor for RhaiProcessor {
+    fn name(&self) -> &str {
+        "RhaiProcessor"
+    }
+
+    fn input_spec(&self) -> Vec<SignalSpec> {
+        self.inner.input_spec()
+    }
+
+    fn output_spec(&self) -> Vec<SignalSpec> {
+        self.inner.output_spec()
+    }
+
+    fn create_output_buffers(&self, size: usize) -> Vec<AnyBuffer> {
+        self.inner.create_output_buffers(size)
+    }
+
+    fn process(
+        &mut self,
+        inputs: ProcessorInputs,
+        mut outputs: ProcessorOutputs,
+    ) -> Result<(), ProcessorError> {
+        self.inner
+            .process_internal(inputs, &mut outputs, &ENGINE, &self.ast)?;
 
         Ok(())
     }

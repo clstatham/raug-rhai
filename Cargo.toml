@@ -3,6 +3,14 @@ name = "raug-rhai"
 version = "0.1.0"
 edition = "2024"
 
+[[bin]]
+name = "raug-rhai-cli"
+path = "src/main.rs"
+
+[lib]
+name = "raug_rhai"
+path = "src/lib.rs"
+
 [dependencies]
 rhai = { version = "1.21.0", features = ["sync", "f32_float"] }
 raug = { path = "../raug" }
