@@ -1,0 +1,11 @@
+[package]
+name = "raug-rhai"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+rhai = { version = "1.21.0", features = ["sync", "f32_float"] }
+raug = { path = "../raug" }
+raug-ext = { path = "../raug-ext" }
+smallvec = "1.15.0"
+clap = { version = "4.5.36", features = ["derive"] }

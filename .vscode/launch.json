@@ -1,0 +1,47 @@
+{
+    // Use IntelliSense to learn about possible attributes.
+    // Hover to view descriptions of existing attributes.
+    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug executable 'raug-rhai'",
+            "cargo": {
+                "args": [
+                    "build",
+                    "--bin=raug-rhai",
+                    "--package=raug-rhai"
+                ],
+                "filter": {
+                    "name": "raug-rhai",
+                    "kind": "bin"
+                }
+            },
+            "args": [
+                "./examples/demo.rhai"
+            ],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug unit tests in executable 'raug-rhai'",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--no-run",
+                    "--bin=raug-rhai",
+                    "--package=raug-rhai"
+                ],
+                "filter": {
+                    "name": "raug-rhai",
+                    "kind": "bin"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        }
+    ]
+}
